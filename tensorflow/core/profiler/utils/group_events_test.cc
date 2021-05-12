@@ -484,6 +484,57 @@ TEST(GroupEventsTest, SemanticUintArgNoMatchTest) {
   EXPECT_EQ(num_events, 3);
 }
 
+TEST(GroupEventsTest, GroupEventsOrderTest) {
+  // This test verifies that user-defined root event should be processed in the first place
+   
+  XSpace raw_space;
+  XPlane* raw_plane = raw_space.add_planes();
+  XPlaneBuilder plane(raw_plane);
+  plane.ReserveLines(1);
+  auto root_producer = plane.GetOrCreateLine(0);
+
+  // Creates an user-defined root event 
+  constexpr int64 kIsRoot = 1;
+  constexpr int64 kStepNum = 3;
+  CreateXEvent(&plane, &root_producer, HostEventType::kUnknownHostEventType, 200, 100,
+               {{StatType::kIsRoot, kIsRoot},
+                {StatType::kStepNum, kStepNum}});
+
+  // Creates another event which will be registered as `tf_loop_root_events_`
+  constexpr int64 kIterNum = 4;
+  constexpr int64 kStepId = 5;
+  CreateXEvent(&plane, &root_producer, HostEventType::kExecutorStateProcess, 0, 10,
+               {{StatType::kStepId, kStepId}, {StatType::kIterNum, kIterNum}});
+
+  GroupTfEvents(&raw_space);
+  int num_events = 0;
+  CreateTfXPlaneVisitor(raw_plane).ForEachLine(
+      [&](const tensorflow::profiler::XLineVisitor& line) {
+        num_events += line.NumEvents();
+        line.ForEachEvent(
+            [&](const tensorflow::profiler::XEventVisitor& event) {
+              absl::optional<int64> group_id;
+              if (absl::optional<XStatVisitor> stat =
+                      event.GetStat(StatType::kGroupId)) {
+                group_id = stat->IntValue();
+              }
+              absl::optional<int64> is_root;
+              if (absl::optional<XStatVisitor> stat =
+                      event.GetStat(StatType::kIsRoot)) {
+                is_root = stat->IntValue();
+              }
+              if (is_root.has_value()) {
+                EXPECT_TRUE(group_id.has_value());
+                EXPECT_EQ(*group_id, 4);
+              }
+              else {
+                EXPECT_FALSE(group_id.has_value());
+              }
+            });
+      });
+  EXPECT_EQ(num_events, 2);
+}
+
 TEST(GroupEventsTest, AsyncEventTest) {
   constexpr int64 kIsRoot = 1;
   constexpr int64 kIsAsync = 1;

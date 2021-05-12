@@ -568,7 +568,6 @@ void EventForest::ConnectInterThread(
 }
 
 void EventForest::CreateEventGroups() {
-
   if(!root_events_.empty()) {
     SortEventList(&root_events_);
     // Create a group for each top root event while ignoring TF's legacy root
