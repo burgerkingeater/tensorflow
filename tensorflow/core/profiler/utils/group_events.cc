@@ -126,15 +126,9 @@ bool IsImplicitRootEvent(const XEventVisitor& event) {
          kImplicitRootEvents->contains(*event.Type());
 }
 
-void ProcessRootEvent(int64 group_id, bool set_step_name, EventNode* root_event,
+void ProcessRootEvent(int64 group_id, EventNode* root_event,
                       GroupMetadataMap* group_metadata_map) {
   root_event->PropagateGroupId(group_id, group_metadata_map);
-  if (!set_step_name) {
-    // Step names are not necessary for inference profiles but add group_id to
-    // group_metadata_map to count the number of groups.
-    group_metadata_map->emplace(group_id, GroupMetadata());
-    return;
-  }
   std::string group_name = root_event->GetGroupName();
   // TODO(jihochoi): change event name instead.
   if (!IsImplicitRootEvent(root_event->GetEventVisitor())) {
@@ -253,23 +247,6 @@ const EventNode* FindParentWithComparator(const Comparator& comparator,
     }
   }
   return nullptr;
-}
-
-// Returns true if none of its ancestors is a root event.
-bool IsTopRoot(const EventNode* event) {
-  // If it is already grouped, it is not a top root.
-  if (event->GetGroupId().has_value()) return false;
-  const EventNode* root_parent = FindParentWithComparator(
-      [](const EventNode* node) { return node->RootLevel() != 0; }, event,
-      /*include_self=*/false);
-  return root_parent == nullptr;
-}
-
-void SortEventList(EventList* event_list) {
-  absl::c_sort(*event_list, [](const EventNode* e1, const EventNode* e2) {
-    return e1->GetEventVisitor().TimestampPs() <
-           e2->GetEventVisitor().TimestampPs();
-  });
 }
 
 // Returns true if it has JAX-related events.
@@ -567,13 +544,44 @@ void EventForest::ConnectInterThread(
   }
 }
 
+// Returns whether a root event needs grouping.
+bool RootNeedsGrouping(const EventNode* root) {
+  // No grouping is needed if it is already grouped.
+  if (root->GetGroupId().has_value()) return false;
+  // If there is a parent node with the same root level, skip grouping at <root>
+  // and later apply grouping at the parent node.
+  // If there is a parent node with a different root level, apply grouping at
+  // <root>, and later apply grouping at the parent node. Root events with
+  // different levels are grouped separately.
+  const EventNode* root_parent = FindParentWithComparator(
+      [root](const EventNode* parent) {
+        return parent->RootLevel() == root->RootLevel();
+      },
+      root,
+      /*include_self=*/false);
+  return root_parent == nullptr;
+}
+
+// Sorts root events based on root level and timestamp.
+void SortRootEventList(EventList* event_list) {
+  absl::c_sort(*event_list, [](const EventNode* e1, const EventNode* e2) {
+    // If two root events have the same root level, the root event with an
+    // earlier timestamp will be processed first. Otherwise, the event with a
+    // larger root level will be processed first.
+    return e1->RootLevel() == e2->RootLevel()
+               ? e1->GetEventVisitor().TimestampPs() <
+                     e2->GetEventVisitor().TimestampPs()
+               : e1->RootLevel() > e2->RootLevel();
+  });
+}
+
 void EventForest::CreateEventGroups() {
   if(!root_events_.empty()) {
     SortEventList(&root_events_);
     // Create a group for each top root event while ignoring TF's legacy root
     // events for JAX profiles.
     for (EventNode* root_event : root_events_) {
-      if (IsTopRoot(root_event) &&
+      if (RootNeedsGrouping(root_event) &&
           (!HasJaxEvent(event_node_map_) ||
           !IsLegacyRootEvent(root_event->GetEventVisitor()))) {
         ProcessRootEvent(next_group_id_++, /*set_step_name=*/true, root_event,
@@ -615,9 +623,9 @@ void EventForest::CreateEventGroups() {
   // Create a group for each TF loop iteration in non-JAX profiles.
   if (!HasJaxEvent(event_node_map_) && !tf_loop_root_events_.empty()) {
     for (EventNode* root_event : tf_loop_root_events_) {
-      ProcessRootEvent(next_group_id_++, /*set_step_name=*/true, root_event,
-                       &group_metadata_map_);
+      ProcessRootEvent(next_group_id_++, root_event, &group_metadata_map_);
     }
+    return;
   }
 }
 
